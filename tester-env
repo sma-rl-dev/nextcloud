@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Nextcloud - Tester Environment CLI (fork root: apps/nextcloud/tester-env).
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, seed, verify, reset, stop, logs, status
+set -euo pipefail
+
+RUN_ID="default"
+PORT="${PORT:-8083}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+    CONTAINER_NAME="tester-env-nextcloud${suffix}"
+    # IMAGE_TAG set by scripts/rl-env to a content-addressed tag so identical
+    # (baseline, patch-set) combos share an image. Manual invocations get :dev.
+    IMAGE_NAME="${IMAGE_TAG:-tester-env-nextcloud:dev}"
+    DATA_VOLUME="nextcloud-data${suffix}"
+}
+
+wait_for_http() {
+    echo "==> Waiting for Nextcloud at http://localhost:${PORT}..."
+    for _ in $(seq 1 60); do
+        if curl -fsS -o /dev/null "http://localhost:${PORT}/status.php" 2>/dev/null; then
+            echo "==> Nextcloud is responding."
+            return 0
+        fi
+        sleep 3
+    done
+    echo "Nextcloud did not become ready at http://localhost:${PORT}" >&2
+    return 1
+}
+
+cmd_deploy() {
+    echo "==> Building Nextcloud image ${IMAGE_NAME} from editable source..."
+    docker build \
+        --label "tester-env.project=tester-env" \
+        --label "tester-env.app=nextcloud" \
+        --label "tester-env.run_id=${RUN_ID}" \
+        -f "${SCRIPT_DIR}/Dockerfile.tester-env" \
+        -t "${IMAGE_NAME}" \
+        "${SCRIPT_DIR}"
+
+    echo "==> Starting container ${CONTAINER_NAME} on port ${PORT}..."
+    docker volume create \
+        --label "tester-env.project=tester-env" \
+        --label "tester-env.app=nextcloud" \
+        --label "tester-env.run_id=${RUN_ID}" \
+        "${DATA_VOLUME}" >/dev/null
+    docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+    docker run -d --name "${CONTAINER_NAME}" \
+        --label "tester-env.project=tester-env" \
+        --label "tester-env.app=nextcloud" \
+        --label "tester-env.run_id=${RUN_ID}" \
+        -p "${PORT}:80" \
+        -v "${DATA_VOLUME}:/var/www/data" \
+        -e "APP_PORT=${PORT}" \
+        "${IMAGE_NAME}" >/dev/null
+
+    wait_for_http
+
+    echo "==> Deployment complete. App running at http://localhost:${PORT}"
+    echo "    Credentials: admin / admin12345"
+}
+
+SEED_ADMIN_USER="admin"
+SEED_ADMIN_PASS="admin12345"
+
+seed_user() {
+    local uid="$1" pass="$2" display="$3"
+    if docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+        -c "php /var/www/html/occ user:info '${uid}'" >/dev/null 2>&1; then
+        echo "    user ${uid} exists, enforcing password/display name..."
+    else
+        echo "    creating user ${uid} (${display})..."
+        docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+            -c "OC_PASS='${pass}' php /var/www/html/occ user:add --password-from-env --display-name='${display}' '${uid}'"
+    fi
+    docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+        -c "OC_PASS='${pass}' php /var/www/html/occ user:resetpassword --password-from-env '${uid}'" >/dev/null
+    curl -fsS -u "${SEED_ADMIN_USER}:${SEED_ADMIN_PASS}" -H "OCS-APIRequest: true" \
+        -X PUT "http://localhost:${PORT}/ocs/v2.php/cloud/users/${uid}" \
+        --data-urlencode "key=displayname" --data-urlencode "value=${display}" >/dev/null
+}
+
+dav_mkcol() {
+    local code
+    code=$(curl -s -o /dev/null -w "%{http_code}" -u "${SEED_ADMIN_USER}:${SEED_ADMIN_PASS}" \
+        -X MKCOL "http://localhost:${PORT}/remote.php/dav/files/${SEED_ADMIN_USER}/$1")
+    case "${code}" in
+        201|405) ;;
+        *) echo "MKCOL $1 failed (HTTP ${code})" >&2; return 1 ;;
+    esac
+}
+
+dav_put() {
+    curl -fsS -u "${SEED_ADMIN_USER}:${SEED_ADMIN_PASS}" -X PUT \
+        --data-binary @- "http://localhost:${PORT}/remote.php/dav/files/${SEED_ADMIN_USER}/$1" >/dev/null
+}
+
+cmd_seed() {
+    echo "==> Seeding deterministic studio-team dataset..."
+    seed_user "alice" "alice12345" "Alice Rivera"
+    seed_user "bob" "bob12345" "Bob Chen"
+
+    echo "==> Seeding admin Files content via WebDAV..."
+    dav_mkcol "Projects"
+    dav_mkcol "Projects/Website-Redesign"
+    dav_mkcol "Notes"
+    dav_mkcol "Shared"
+
+    dav_put "Projects/Website-Redesign/launch-plan.md" <<'EOF'
+# Acme Studio launch plan
+
+Website redesign goes live end of Q3 2026.
+
+## Checklist
+
+- [x] Homepage copy approved by Alice
+- [ ] Product screenshots from Bob
+- [ ] Final accessibility pass
+
+Owner: Alice Rivera. Status: in review.
+EOF
+    dav_put "Projects/budget-2026.txt" <<'EOF'
+BUDGET-2026
+Hosting: 1200 EUR
+Design tools: 600 EUR
+Contingency: 400 EUR
+Total: 2200 EUR
+EOF
+    dav_put "Notes/weekly-standup-2026-09-07.md" <<'EOF'
+# Weekly standup 2026-09-07
+
+- Alice: homepage copy done, starting pricing page.
+- Bob: screenshots delayed, camera rental Thursday.
+- Next: accessibility pass before launch.
+EOF
+    dav_put "Shared/reading-list.txt" <<'EOF'
+Acme Studio reading list
+1. Design systems handbook
+2. Web performance basics
+3. Accessibility checklist
+EOF
+    echo "==> Refreshing filecache for seed users..."
+    docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+        -c "php /var/www/html/occ files:scan --quiet admin alice bob" 2>/dev/null || true
+    echo "==> Seed complete: users admin + alice + bob; 3 folders + 4 files in admin Files."
+}
+
+cmd_verify() {
+    echo "==> Verifying Nextcloud install..."
+    docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+        -c 'php /var/www/html/occ status' | grep -q 'installed: *true' \
+        || { echo "occ status does not report installed:true" >&2; return 1; }
+    echo "==> occ status: installed."
+    if ! curl -fsS "http://localhost:${PORT}/status.php" | grep -q '"installed":true'; then
+        echo "status.php does not report installed:true" >&2
+        return 1
+    fi
+    echo "==> status.php: installed."
+    for u in admin alice bob; do
+        docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+            -c "php /var/www/html/occ user:info '${u}'" >/dev/null 2>&1 \
+            || { echo "user ${u} not found" >&2; return 1; }
+        echo "==> user ${u} present."
+    done
+    for f in "admin/files/Projects/Website-Redesign/launch-plan.md" "admin/files/Projects/budget-2026.txt" "admin/files/Notes/weekly-standup-2026-09-07.md" "admin/files/Shared/reading-list.txt"; do
+        docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+            -c "php /var/www/html/occ files:get '${f}'" >/dev/null 2>&1 \
+            || { echo "seeded file ${f} not found" >&2; return 1; }
+        echo "==> file ${f} present."
+    done
+    if ! docker exec "${CONTAINER_NAME}" su -s /bin/bash www-data \
+        -c "php /var/www/html/occ files:get admin/files/Projects/Website-Redesign/launch-plan.md" 2>/dev/null | grep -q "Acme Studio launch plan"; then
+        echo "launch-plan.md content mismatch" >&2
+        return 1
+    fi
+    echo "==> launch-plan.md content stable."
+    echo "==> Verify passed. Nextcloud running at http://localhost:${PORT}/"
+    echo "    Credentials: admin / admin12345, alice / alice12345, bob / bob12345"
+}
+
+cmd_reset() {
+    echo "==> Resetting Nextcloud (${CONTAINER_NAME} + ${DATA_VOLUME})..."
+    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+    docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+    docker volume rm "${DATA_VOLUME}" 2>/dev/null || true
+    echo "==> Reset complete. Run 'deploy' to start fresh."
+}
+
+cmd_stop() {
+    echo "==> Stopping ${CONTAINER_NAME} (data preserved)..."
+    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+    echo "==> Stopped."
+}
+
+cmd_logs() {
+    docker logs -f --tail=200 "${CONTAINER_NAME}" 2>/dev/null || echo "Container not running."
+}
+
+cmd_status() {
+    if docker ps --filter "name=^${CONTAINER_NAME}$" --format "{{.Names}}" | grep -q "${CONTAINER_NAME}"; then
+        echo "Status: RUNNING"
+        echo "URL: http://localhost:${PORT}"
+        echo "Container: ${CONTAINER_NAME}"
+    else
+        echo "Status: NOT RUNNING"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+Nextcloud tester-env CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build from editable source, start container, auto-install (SQLite)
+  seed      Create deterministic users + Files seed (realistic data)
+  verify    Check occ status, status.php, users, and seeded files
+  reset     Stop container and remove data volume (clean slate, keeps image)
+  stop      Stop container (preserves data)
+  logs      Follow container logs
+  status    Show container status and URL
+  help      Show this help
+
+Options:
+  --run-id <id>   Isolate container and volume names (default: default)
+  --port <port>   Host port mapped to container port 80 (default: 8083)
+
+Credentials: admin / admin12345
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run-id)
+                RUN_ID="${2:?--run-id requires a value}"
+                shift 2
+                ;;
+            --port)
+                PORT="${2:?--port requires a value}"
+                shift 2
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                cmd_help
+                exit 1
+                ;;
+        esac
+    done
+
+    refresh_names
+
+    case "${cmd}" in
+        deploy) cmd_deploy ;;
+        seed) cmd_seed ;;
+        verify) cmd_verify ;;
+        reset) cmd_reset ;;
+        stop) cmd_stop ;;
+        logs) cmd_logs ;;
+        status) cmd_status ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Unknown command: ${cmd}" >&2
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

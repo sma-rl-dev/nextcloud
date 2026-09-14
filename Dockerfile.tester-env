@@ -1,0 +1,67 @@
+# Tester-env source build for Nextcloud (prospect stage).
+# Builds editable upstream source on php:8.4-apache with SQLite.
+# Layer order is mutation-friendly: slow dependency steps (apt extensions,
+# composer install) are cached; small PHP source edits only re-run the COPY
+# + autoload layers.
+FROM php:8.4-apache-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    COMPOSER_ALLOW_SUPERUSER=1
+
+# Nextcloud runtime extensions (composer.json require + sqlite driver).
+# Skipped on purpose: imagick, redis, ldap, smbclient, ftp (optional; the
+# admin overview shows setup warnings for some of these — see README caveat).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev \
+        libzip-dev libicu-dev libgmp-dev libsqlite3-dev unzip sudo \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
+    && docker-php-ext-install -j"$(nproc)" \
+        gd intl zip exif gmp bcmath pcntl \
+    && pecl install apcu \
+    && docker-php-ext-enable apcu \
+    && rm -rf /var/lib/apt/lists/* \
+    && a2enmod rewrite headers env mime
+
+# PHP tuning for occ + composer (test env values, not production).
+RUN { \
+        echo 'memory_limit=1G'; \
+        echo 'upload_max_filesize=512M'; \
+        echo 'post_max_size=512M'; \
+        echo 'opcache.enable=1'; \
+        echo 'opcache.memory_consumption=256'; \
+        echo 'opcache.interned_strings_buffer=32'; \
+        echo 'opcache.max_accelerated_files=10000'; \
+        echo 'apc.enable_cli=1'; \
+    } > /usr/local/etc/php/conf.d/tester-env.ini
+
+# Apache must honour Nextcloud's .htaccess (pretty URLs, security headers).
+RUN { \
+        echo '<Directory /var/www/html/>'; \
+        echo '    AllowOverride All'; \
+        echo '    Require all granted'; \
+        echo '</Directory>'; \
+    } > /etc/apache2/conf-available/nextcloud-tester-env.conf \
+    && a2enconf nextcloud-tester-env
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+# Dependency layer first: rebuilds only when composer.json/lock change.
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --prefer-dist --no-scripts --no-autoloader
+
+# Editable source layer: small mutations only invalidate from here down.
+COPY . /var/www/html/
+RUN composer dump-autoload --no-dev --optimize \
+    && mkdir -p /var/www/data \
+    && chown -R www-data:www-data /var/www/html/config /var/www/data \
+    && chown www-data:www-data /var/www/html/.htaccess
+
+COPY docker-entrypoint-tester-env.sh /usr/local/bin/docker-entrypoint-tester-env.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint-tester-env.sh
+
+EXPOSE 80
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-tester-env.sh"]
+CMD ["apache2-foreground"]

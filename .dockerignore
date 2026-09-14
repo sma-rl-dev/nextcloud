@@ -1,0 +1,6 @@
+# Tester-env build context: keep the image to editable source only.
+.git
+.github
+tester-env
+docker-entrypoint-tester-env.sh
+DEPLOY-SMA.md
