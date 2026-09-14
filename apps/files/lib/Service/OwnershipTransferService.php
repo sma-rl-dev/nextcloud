@@ -399,6 +399,9 @@ class OwnershipTransferService {
 		}, $shares)));
 	}
 
+	/**
+	 * @return array<int, IShare> shares keyed by node ID
+	 */
 	private function collectIncomingShares(
 		string $sourceUid,
 		IOutput $output,
@@ -578,6 +581,10 @@ class OwnershipTransferService {
 		$output->writeln('');
 	}
 
+	/**
+	 * @param array<int, IShare> $sourceShares shares of the source user, keyed by node ID
+	 * @param array<int, IShare> $destinationShares shares of the destination user, keyed by node ID
+	 */
 	private function transferIncomingShares(
 		string $sourceUid,
 		string $destinationUid,
@@ -615,7 +622,7 @@ class OwnershipTransferService {
 					$destinationShare = $destinationShares[$share->getNodeId()];
 					// Keep the share which has the most permissions and discard the other one.
 					if ($destinationShare->getPermissions() < $share->getPermissions()) {
-						$this->promoteLinkShares($destinationShare);
+						$this->promoteLinkShares($destinationShare, $share->getId());
 						$this->shareManager->deleteShare($destinationShare);
 						$share->setSharedWith($destinationUid);
 						// trigger refetching of the node so that the new owner and mountpoint are taken into account
@@ -635,7 +642,7 @@ class OwnershipTransferService {
 						$this->mountManager->moveMount($oldMountPoint, $newMountPoint);
 						continue;
 					}
-					$this->promoteLinkShares($share);
+					$this->promoteLinkShares($share, $destinationShare->getId());
 					$this->shareManager->deleteShare($share);
 				} elseif ($share->getShareOwner() === $destinationUid) {
 					$this->promoteLinkShares($share);
@@ -671,13 +678,15 @@ class OwnershipTransferService {
 	}
 
 	/**
-	 * Links or email shares need to be promoted before the original share
-	 * is dropped, as the deletion is cascaded.
+	 * Sets the parent column of the link/email shares with $share as parent to
+	 * `null` or, if provided, to $newParentId.
 	 */
-	private function promoteLinkShares(IShare $share): void {
+	private function promoteLinkShares(IShare $share, ?string $newParentId = null): void {
 		$qb = $this->connection->getQueryBuilder();
+		$parentParam = $newParentId === null ? $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL) : $qb->createNamedParameter($newParentId, IQueryBuilder::PARAM_STR);
+
 		$qb->update('share')
-			->set('parent', $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL))
+			->set('parent', $parentParam)
 			->where($qb->expr()->eq('parent', $qb->createNamedParameter($share->getId())))
 			->andWhere($qb->expr()->in('share_type', $qb->createNamedParameter([IShare::TYPE_LINK, IShare::TYPE_EMAIL], IQueryBuilder::PARAM_INT_ARRAY)))
 			->executeStatement();
