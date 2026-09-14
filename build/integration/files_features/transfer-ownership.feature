@@ -317,6 +317,30 @@ Feature: transfer-ownership
 		And the command was successful
 		Then last link share can be downloaded
 
+	Scenario: transferring ownership of folder shared with source and destination independently with a link share created by destination
+		Given user "user0" exists
+		And user "user1" exists
+		And user "user2" exists
+		And User "user2" created a folder "/test"
+		And User "user2" uploads file "data/textfile.txt" to "/test/somefile.txt"
+		And folder "/test" of user "user2" is shared with user "user0" with permissions 31
+		And user "user0" accepts last share
+		And save the last share data as "survivor"
+		And folder "/test" of user "user2" is shared with user "user1" with permissions 17
+		And user "user1" accepts last share
+		And as "user1" creating a share with
+			| path | test/somefile.txt |
+			| shareType | 3 |
+		And the OCS status code should be "100"
+		And save the last share data as "link"
+		When transferring ownership from "user0" to "user1"
+		And the command was successful
+		Then last link share can be downloaded
+		When restore the last share data from "survivor"
+		And Deleting last share
+		And restore the last share data from "link"
+		Then last link share can not be downloaded with status "404"
+
 	Scenario: transferring ownership transfers received shares
 		Given user "user0" exists
 		And user "user1" exists
