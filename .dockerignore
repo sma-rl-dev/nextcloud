@@ -1,6 +1,7 @@
 # Tester-env build context: keep the image to editable source only.
+# NOTE: docker-entrypoint-tester-env.sh must NOT be excluded — the
+# Dockerfile COPYs it into the image as ENTRYPOINT.
 .git
 .github
 tester-env
-docker-entrypoint-tester-env.sh
 DEPLOY-SMA.md

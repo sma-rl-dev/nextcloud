@@ -36,8 +36,9 @@ fork root (on `tester-env-baseline`):
 Deterministic sequence: `./tester-env reset && ./tester-env deploy &&
 ./tester-env seed` (seed is idempotent: users are enforced to fixed
 passwords/display names, WebDAV MKCOL tolerates 201/405, PUT overwrites
-fixed content. Verified: seed→verify→seed→verify plus
-reset→deploy→seed→verify this session.)
+fixed content, and seed DELETEs known smoke-test leftovers
+`smoke-test-2026-09-15`/`SmokeFolder` before reseeding. Verified:
+seed→verify→seed→verify plus reset→deploy→seed→verify this session.)
 
 URL: http://localhost:8083/ (status.php at `/status.php`, login at `/login`).
 
@@ -114,8 +115,10 @@ appstore fetch), so seeding is Files-only by design.
 1. Fixed `admin`/`admin12345` auto-install (see above) instead of
    first-run wizard.
 2. SQLite backend (`/var/www/data` volume) instead of external MySQL/PgSQL.
-3. `.dockerignore`: added `tester-env`, `docker-entrypoint-tester-env.sh`,
-   `DEPLOY-SMA.md` so tooling stays out of the image context; upstream
+3. `.dockerignore`: added `tester-env`, `DEPLOY-SMA.md` so tooling stays
+   out of the image context (`docker-entrypoint-tester-env.sh` must stay
+   IN the context — the Dockerfile COPYs it as ENTRYPOINT; excluding it
+   breaks `deploy` after `reset` — fixed 2026-09-15). Upstream
    checkout itself is otherwise unmodified.
 4. Omitted optional extensions: imagick/redis/ldap (admin overview shows
    setup warnings for some of these).
