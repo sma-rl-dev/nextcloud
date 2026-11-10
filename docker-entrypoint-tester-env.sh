@@ -40,16 +40,56 @@ fi
 # 2=host.docker.internal) and point CLI-generated URLs at the same origin.
 # Ports are stripped by TrustedDomainHelper::isTrustedDomain, so the host alone
 # is enough and a new run port needs no config change.
-BROWSER_ORIGIN="${TESTER_ENV_BROWSER_ORIGIN:-}"
-if [ -n "${BROWSER_ORIGIN}" ]; then
-    BROWSER_HOST="${BROWSER_ORIGIN#*://}"
-    BROWSER_HOST="${BROWSER_HOST%%/*}"
-    BROWSER_HOST="${BROWSER_HOST%%:*}"
-    if [ -n "${BROWSER_HOST}" ]; then
-        echo "==> Trusting browser origin host ${BROWSER_HOST}"
-        occ config:system:set trusted_domains 3 --value="${BROWSER_HOST}"
-        occ config:system:set overwrite.cli.url --value="${BROWSER_ORIGIN}"
+#
+# origin_host prints the host of "scheme://host[:port][/path]". IPv6 literals
+# keep their brackets because that is the form a Host header carries and the
+# form TrustedDomainHelper compares against.
+origin_host() {
+    local rest="${1#*://}"
+    rest="${rest%%/*}"
+    case "${rest}" in
+        \[*\]*)
+            rest="${rest#\[}"
+            printf '%s\n' "[${rest%%\]*}]"
+            ;;
+        *:*)
+            printf '%s\n' "${rest%%:*}"
+            ;;
+        *)
+            printf '%s\n' "${rest}"
+            ;;
+    esac
+}
+
+configure_origin() {
+    local origin="${TESTER_ENV_BROWSER_ORIGIN:-}" host parsed=0
+    if [ -z "${origin}" ]; then
+        # No runner origin (manual deploy, possibly on a retained volume): drop
+        # the browser-origin entry an earlier run may have left behind and fall
+        # back to the same local default the installer uses. Never widen
+        # trusted_domains beyond this single, rewritten slot.
+        occ config:system:delete trusted_domains 3 >/dev/null 2>&1 || true
+        occ config:system:set overwrite.cli.url --value="http://localhost:${APP_PORT}"
+        echo "==> Browser origin unset: keeping local defaults at http://localhost:${APP_PORT}"
+        return 0
     fi
-fi
+    host="$(origin_host "${origin}")"
+    if [ -n "${host}" ]; then
+        case "${host}" in
+            \[*\]) parsed=1 ;;
+            *\[*|*\]*|*/*|*' '*) parsed=0 ;;
+            *) parsed=1 ;;
+        esac
+    fi
+    if [ "${parsed}" -ne 1 ]; then
+        echo "Refusing unparsable browser origin host in TESTER_ENV_BROWSER_ORIGIN='${origin}'" >&2
+        exit 2
+    fi
+    echo "==> Trusting browser origin host ${host}"
+    occ config:system:set trusted_domains 3 --value="${host}"
+    occ config:system:set overwrite.cli.url --value="${origin}"
+}
+
+configure_origin
 
 exec "$@"
