@@ -33,4 +33,23 @@ else
     echo "==> Nextcloud already installed, skipping setup."
 fi
 
+# Browser-origin contract (scripts/rl-env): the runner's browser container
+# reaches this app through http://<bridge-gateway>:<port>, never localhost, and
+# Nextcloud answers HTTP 400 for any host that is not a trusted domain, before
+# any route runs. Trust that host on every boot (index 3 is free: 1=localhost,
+# 2=host.docker.internal) and point CLI-generated URLs at the same origin.
+# Ports are stripped by TrustedDomainHelper::isTrustedDomain, so the host alone
+# is enough and a new run port needs no config change.
+BROWSER_ORIGIN="${TESTER_ENV_BROWSER_ORIGIN:-}"
+if [ -n "${BROWSER_ORIGIN}" ]; then
+    BROWSER_HOST="${BROWSER_ORIGIN#*://}"
+    BROWSER_HOST="${BROWSER_HOST%%/*}"
+    BROWSER_HOST="${BROWSER_HOST%%:*}"
+    if [ -n "${BROWSER_HOST}" ]; then
+        echo "==> Trusting browser origin host ${BROWSER_HOST}"
+        occ config:system:set trusted_domains 3 --value="${BROWSER_HOST}"
+        occ config:system:set overwrite.cli.url --value="${BROWSER_ORIGIN}"
+    fi
+fi
+
 exec "$@"

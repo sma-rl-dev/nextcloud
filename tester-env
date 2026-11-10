@@ -82,6 +82,7 @@ cmd_deploy() {
         --label "tester-env.app=nextcloud" \
         --label "tester-env.run_id=${RUN_ID}" \
         -p "${PORT}:80" \
+        -e "TESTER_ENV_BROWSER_ORIGIN=${TESTER_ENV_BROWSER_ORIGIN:-}" \
         -v "${DATA_VOLUME}:/var/www/data" \
         -e "APP_PORT=${PORT}" \
         "${IMAGE_NAME}" >/dev/null
