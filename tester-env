@@ -56,6 +56,12 @@ wait_for_http() {
 
 cmd_deploy() {
     echo "==> Building Nextcloud image ${IMAGE_NAME} from editable source..."
+    # 3rdparty is a git submodule holding the composer autoloader. A runner
+    # worktree (git worktree add) carries only the gitlink, so without this the
+    # image ships an empty 3rdparty, /status.php answers 503 "Composer
+    # autoloader not found" and readiness never succeeds. Idempotent: an
+    # already-populated checkout is left untouched.
+    git -C "${SCRIPT_DIR}" submodule update --init -- 3rdparty
     docker build \
         --label "tester-env.project=tester-env" \
         --label "tester-env.app=nextcloud" \
