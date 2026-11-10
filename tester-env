@@ -30,6 +30,27 @@ wait_for_http() {
         sleep 3
     done
     echo "Nextcloud did not become ready at http://localhost:${PORT}" >&2
+    # Diagnostics before the caller tears the container down. A readiness
+    # failure has two very different shapes: Apache never listens (connection
+    # refused, nothing to read) or Nextcloud answers but is not installed /
+    # still installing. /status.php reports which one, and the container log
+    # carries the entrypoint's occ output, because the entrypoint runs under
+    # `set -e` and exits on the first failing occ command.
+    local status body container_state
+    status=$(curl -sS -o /dev/null -w '%{http_code}' "http://localhost:${PORT}/status.php" 2>/dev/null) \
+        || status='no response (connection failed)'
+    echo "==> Diagnostics: last /status.php response (HTTP ${status})" >&2
+    body=$(curl -sS "http://localhost:${PORT}/status.php" 2>&1 | head -c 1000) || true
+    if [[ -n "${body}" ]]; then
+        echo "    ${body}" >&2
+    else
+        echo "    (empty body: the app is not answering)" >&2
+    fi
+    container_state=$(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' "${CONTAINER_NAME}" 2>/dev/null) \
+        || container_state='container missing'
+    echo "==> Diagnostics: container ${CONTAINER_NAME} state ${container_state}" >&2
+    echo "==> Diagnostics: docker logs --tail 100 ${CONTAINER_NAME}" >&2
+    docker logs --tail 100 "${CONTAINER_NAME}" 2>&1 || true
     return 1
 }
 
